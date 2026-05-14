@@ -142,8 +142,10 @@ FIELD_ALIASES = {
         "销售额",
         "总销售额",
         "广告销售额",
-        "销量",
-        "销量（浏览次数和点击量）",
+        "7 天总销售额",
+        "7 天总销售额 ",
+        "14 天总销售额",
+        "14 天总销售额 ",
     ],
     "orders": [
         "Orders",
@@ -158,6 +160,18 @@ FIELD_ALIASES = {
         "订单数量",
         "订单量（浏览次数和点击量）",
         "购买量",
+        "销量",
+        "销量（浏览次数和点击量）",
+        "7 天总订单量",
+        "7 天总订单数",
+        "14 天总订单量",
+        "14 天总订单数",
+        "7 天总订单量 ",
+        "14 天总订单量 ",
+        "7 天总销售量",
+        "14 天总销售量",
+        "7 天总销售量 ",
+        "14 天总销售量 ",
     ],
     "ad_product": [
         "Ad Product",
@@ -273,7 +287,9 @@ def detect_field_mapping(
 
 def detect_field_candidates(columns: Iterable[object]) -> dict[str, list[str]]:
     normalized_columns = _normalized_columns(columns)
+    column_keys = list(normalized_columns.keys())
     candidates: dict[str, list[str]] = {}
+
     for field_key, aliases in ALIAS_LOOKUP.items():
         for alias in aliases:
             if alias not in normalized_columns:
@@ -282,6 +298,22 @@ def detect_field_candidates(columns: Iterable[object]) -> dict[str, list[str]]:
             for column in normalized_columns[alias]:
                 if column not in candidates[field_key]:
                     candidates[field_key].append(column)
+
+    # Fallback: partial (substring) matching for fields with zero exact matches
+    for field_key, aliases in ALIAS_LOOKUP.items():
+        if field_key in candidates:
+            continue
+        for alias in aliases:
+            for column_key in column_keys:
+                if alias in column_key or column_key in alias:
+                    candidates.setdefault(field_key, [])
+                    for column in normalized_columns[column_key]:
+                        if column not in candidates[field_key]:
+                            candidates[field_key].append(column)
+                    break
+            if field_key in candidates:
+                break
+
     return candidates
 
 

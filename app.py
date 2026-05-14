@@ -145,7 +145,7 @@ def render_sidebar_controls() -> tuple[AppSettings, list[Any], bool]:
         st.markdown("## 控制中心")
         st.caption("上传报表、调整阈值，然后开始诊断。")
 
-        mode = st.radio("诊断模式", ["基础版", "完整版"], index=1, horizontal=True)
+        mode = "完整版"
         target_acos_percent = st.number_input("目标 ACOS（%）", 1.0, 300.0, 30.0, 1.0)
         min_waste_clicks = st.number_input("最低点击阈值", 1, 200, default.min_waste_clicks, 1)
         min_waste_spend = st.number_input("最低花费阈值", 0.0, 10000.0, default.min_waste_spend, 1.0)
@@ -336,6 +336,22 @@ def render_overview_tab(state: AnalysisState) -> None:
                 render_stat_card(label, value, "neutral")
 
     render_upload_status(state.file_summaries)
+
+    with st.expander("调试信息（数据管道追踪）", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        cleaned = state.cleaned_data
+        enriched = state.enriched_data
+        c1.metric("cleaned Sales dtype", str(cleaned["Sales"].dtype) if "Sales" in cleaned.columns else "MISSING")
+        c1.metric("cleaned Sales sum", f'{pd.to_numeric(cleaned["Sales"], errors="coerce").sum():.2f}' if "Sales" in cleaned.columns else "N/A")
+        c2.metric("enriched Sales dtype", str(enriched["Sales"].dtype) if "Sales" in enriched.columns else "MISSING")
+        c2.metric("enriched Sales sum", f'{enriched["Sales"].sum():.2f}' if "Sales" in enriched.columns else "N/A")
+        c3.metric("overview 总销售额", f'{state.overview["总销售额"]:,.2f}')
+        st.caption("如果上方的「总销售额」KPI 卡片显示 $0.00 但此处的 overview 总销售额不为 0，则是 UI 渲染问题。")
+        st.caption("如果此处的 overview 总销售额也是 0.00，但 cleaned/enriched Sales sum 不为 0，则是 overview 计算问题。")
+        st.caption("如果 cleaned Sales sum 就是 0.00，则是字段映射阶段的问题。")
+
+    st.divider()
+    st.caption(f"模块版本标识 — field_mapping:1.1 / metrics:1.1 / data_loader:1.1")
 
 
 def render_actions_tab(state: AnalysisState) -> None:
@@ -908,6 +924,35 @@ def inject_styles() -> None:
     css_path = Path(__file__).with_name("styles.css")
     if css_path.exists():
         st.markdown(f"<style>{css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+
+    # 追加内联样式，屏蔽 file uploader 英文文字
+    st.markdown("""
+    <style>
+    /* 最强优先级：用全部可能的 selector 确保命中 */
+    html body section[data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"],
+    html body [data-testid="stFileUploaderDropzoneInstructions"],
+    [data-testid="stFileUploaderDropzoneInstructions"] {
+        visibility: hidden !important;
+        max-height: 0 !important;
+        overflow: hidden !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+    /* 按钮文字替换 */
+    html body section[data-testid="stFileUploaderDropzone"] button,
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 0 !important;
+    }
+    html body section[data-testid="stFileUploaderDropzone"] button::after,
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "选择文件" !important;
+        font-size: 14px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

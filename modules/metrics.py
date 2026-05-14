@@ -107,7 +107,7 @@ def _to_number(value: object) -> float:
         return float(value)
 
     text = str(value).strip()
-    if not text:
+    if not text or text in ("—", "–", "-", "—", "N/A", "n/a", "NA", "暂无", "无"):
         return 0.0
 
     text = (
@@ -118,6 +118,10 @@ def _to_number(value: object) -> float:
         .replace("%", "")
         .replace("(", "-")
         .replace(")", "")
+        .replace("\xa0", "")   # non-breaking space
+        .replace(" ", "")  # thin space
+        .replace(" ", "")  # narrow no-break space
+        .replace(" ", "")       # regular space (thousands sep in some locales)
     )
 
     try:

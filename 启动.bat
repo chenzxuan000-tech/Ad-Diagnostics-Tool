@@ -34,9 +34,9 @@ call .venv\Scripts\activate.bat
 
 if not exist ".venv\.installed" (
     echo.
-    echo ^>^>^> 正在安装依赖包（使用清华镜像加速）...
-    pip install --quiet --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple
-    pip install --quiet -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+    echo ^>^>^> 正在安装依赖包...
+    pip install --quiet --upgrade pip
+    pip install --quiet -r requirements.txt
     type nul > .venv\.installed
     echo ✅ 依赖安装完成
 )

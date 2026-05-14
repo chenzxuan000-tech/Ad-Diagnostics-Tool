@@ -85,7 +85,7 @@ def _has_required_metrics(df: pd.DataFrame) -> bool:
     normalized_columns = {str(column).strip() for column in df.columns}
     impressions_aliases = {"Impressions", "Impression", "展示量", "曝光量"}
     clicks_aliases = {"Clicks", "Click", "点击量", "点击"}
-    spend_aliases = {"Spend", "Cost", "Costs", "花费"}
+    spend_aliases = {"Spend", "Cost", "Costs", "Total Spend", "花费", "支出", "广告花费"}
     return (
         bool(normalized_columns & impressions_aliases)
         and bool(normalized_columns & clicks_aliases)
