@@ -10,7 +10,9 @@ from modules.metrics import format_percent
 
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODELS = ["deepseek-v4-pro", "deepseek-v4-flash"]
+DEEPSEEK_PRO_MODEL = "deepseek-v4-pro"
+DEEPSEEK_FLASH_MODEL = "deepseek-v4-flash"
+DEEPSEEK_MODELS = [DEEPSEEK_PRO_MODEL, DEEPSEEK_FLASH_MODEL]
 
 
 @dataclass(frozen=True)

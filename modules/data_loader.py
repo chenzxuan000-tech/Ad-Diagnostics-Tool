@@ -26,14 +26,18 @@ def read_report(uploaded_file: BinaryIO, filename: str) -> pd.DataFrame:
 
 
 def _read_csv(uploaded_file: BinaryIO) -> pd.DataFrame:
-    encodings = ["utf-8-sig", "utf-8", "gb18030", "latin1"]
+    encodings = ["utf-8-sig", "utf-8", "gb18030", "utf-16", "utf-16le", "utf-16be"]
     last_error: Exception | None = None
 
     for encoding in encodings:
         try:
             uploaded_file.seek(0)
-            return pd.read_csv(uploaded_file, encoding=encoding)
-        except UnicodeDecodeError as exc:
+            dataframe = pd.read_csv(uploaded_file, encoding=encoding)
+            if _looks_like_mojibake(dataframe.columns):
+                last_error = ValueError(f"{encoding} 解码后字段名疑似乱码")
+                continue
+            return dataframe
+        except (UnicodeDecodeError, UnicodeError, ValueError) as exc:
             last_error = exc
 
     raise ValueError(f"CSV 编码无法识别，请另存为 UTF-8 后重试。错误：{last_error}")
@@ -112,3 +116,11 @@ def _is_search_term_sheet(sheet_name: str, df: pd.DataFrame) -> bool:
     if any(hint in sheet_lower for hint in SEARCH_TERM_SHEET_HINTS):
         return True
     return "顾客搜索词" in df.columns or "Customer Search Term" in df.columns
+
+
+def _looks_like_mojibake(columns: pd.Index) -> bool:
+    text = " ".join(str(column) for column in columns)
+    if not text.strip():
+        return False
+    mojibake_markers = ("Ã", "Â", "�", "锘", "ï»¿")
+    return any(marker in text for marker in mojibake_markers)

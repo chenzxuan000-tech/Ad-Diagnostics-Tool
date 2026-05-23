@@ -1,0 +1,14 @@
+Campaign Name,Ad Group Name,Customer Search Term,Targeting,Match Type,Impressions,Clicks,Spend,Sales,Orders
+Professional - Low Data,Learning Group,low spend no order,,Broad,200,3,2.5,0,0
+Professional - Waste,Waste Group,free replacement parts,,Broad,5200,36,54,0,0
+Professional - High ACOS,Exact Group,expensive converter,,Exact,1400,24,48,30,1
+Professional - Growth,Exact Group,best exact term,,Exact,900,32,12,120,4
+Professional - Low CTR,Broad Group,low click keyword,,Broad,7000,7,5,0,0
+Professional - Low CVR,Broad Group,high click low order,,Broad,3200,36,36,0,0
+Professional - Mixed Campaign,Mixed Group,good campaign term,,Exact,1300,26,10,100,3
+Professional - Mixed Campaign,Mixed Group,bad campaign term,,Broad,2500,22,38,0,0
+Professional - Pause Candidate,Waste Group,waste one,,Broad,3200,22,30,0,0
+Professional - Pause Candidate,Waste Group,waste two,,Broad,3400,24,34,0,0
+Professional - Pause Candidate,Waste Group,waste three,,Broad,3000,20,28,0,0
+Professional - Protected,Brand Group,brand free parts,,Broad,4200,35,50,0,0
+Professional - Insufficient ACOS,Learning Group,one early order,,Broad,180,2,3,1,1

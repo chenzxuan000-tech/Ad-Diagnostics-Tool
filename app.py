@@ -11,6 +11,7 @@ import streamlit as st
 
 from modules.aggregation import build_dimension_aggregations
 from modules.ai_report import generate_ai_report, report_to_dataframe
+from modules.action_overload import enrich_action_prioritization
 from modules.data_loader import read_report
 from modules.deepseek_client import DEEPSEEK_MODELS, generate_deepseek_report
 from modules.diagnosis import (
@@ -21,6 +22,7 @@ from modules.diagnosis import (
     build_negative_keywords,
     build_pause_list,
     build_priority_list,
+    run_diagnosis_self_check,
     run_diagnosis,
     summarize_recommendations,
 )
@@ -29,6 +31,7 @@ from modules.field_mapping import CANONICAL_FIELDS, apply_field_mapping, mapping
 from modules.field_mapping import infer_report_type, missing_required_fields
 from modules.metrics import add_metrics, calculate_account_overview, format_percent, overview_dataframe
 from modules.pivot import ACTION_PIVOT_PRESETS, build_action_pivot, build_export_pivots
+from modules.rules_config import DEFAULT_DIAGNOSIS_STRICTNESS, STRICTNESS_OPTIONS
 from modules.settings import AppSettings
 
 
@@ -126,6 +129,7 @@ class AnalysisState:
     growth_list: pd.DataFrame
     exact_opportunities: pd.DataFrame
     priority_list: pd.DataFrame
+    self_check: dict[str, object]
     ai_report_sections: list[dict[str, str]]
 
 
@@ -258,6 +262,8 @@ def render_sidebar_controls() -> tuple[AppSettings, list[Any], bool]:
                 budget_pressure_ratio=budget_pressure_percent / 100,
                 pause_spend_multiplier=float(pause_spend_multiplier),
                 exact_opportunity_orders=int(exact_opportunity_orders),
+                protected_terms=config.protected_terms,
+                diagnosis_strictness=config.diagnosis_strictness,
             )
 
         with st.expander("上传与运行", expanded=True):
@@ -277,8 +283,29 @@ def render_sidebar_controls() -> tuple[AppSettings, list[Any], bool]:
             start_clicked = st.button("开始诊断 · 已就绪" if uploaded_files else "开始诊断", type="primary", width="stretch")
 
         with st.expander("高级选项", expanded=False):
+            diagnosis_strictness = st.selectbox(
+                "诊断严格度",
+                list(STRICTNESS_OPTIONS),
+                index=list(STRICTNESS_OPTIONS).index(DEFAULT_DIAGNOSIS_STRICTNESS),
+                help="保守更少强动作，激进更快识别浪费项；安全底线始终保留。",
+            )
+            protected_terms_text = st.text_input(
+                "保护词",
+                value="",
+                placeholder="品牌词、核心词，用逗号分隔",
+                help="命中保护词的搜索词不会被直接否定或暂停。",
+            )
             manual_mapping_enabled = st.checkbox("启用手动字段映射", value=False)
             ai_report_enabled = st.checkbox("启用本地 AI 报告模板", value=True)
+
+        protected_terms = tuple(term.strip() for term in re.split(r"[,，\n]", protected_terms_text) if term.strip())
+        config = DiagnosisConfig(
+            **{
+                **config.__dict__,
+                "protected_terms": protected_terms,
+                "diagnosis_strictness": diagnosis_strictness,
+            }
+        )
 
         if "analysis_state" in st.session_state:
             with st.expander("快捷导出", expanded=False):
@@ -309,6 +336,8 @@ def diagnosis_config_for_preset(rule_preset: str, target_acos: float, default: D
         "budget_pressure_ratio": default.budget_pressure_ratio,
         "pause_spend_multiplier": default.pause_spend_multiplier,
         "exact_opportunity_orders": default.exact_opportunity_orders,
+        "protected_terms": default.protected_terms,
+        "diagnosis_strictness": default.diagnosis_strictness,
     }
     if rule_preset == "稳健止损（推荐）":
         values.update(
@@ -435,6 +464,7 @@ def build_analysis_state(
     data_quality_notes = build_data_quality_notes(mapping_df, enriched_data)
     overview = calculate_account_overview(enriched_data)
     actions = run_diagnosis(enriched_data, settings.diagnosis_config, settings.mode)
+    actions = enrich_action_prioritization(actions, settings.diagnosis_config)
     summary = summarize_recommendations(actions)
     action_pivots = build_export_pivots(actions)
     negative_keywords = build_negative_keywords(actions)
@@ -443,6 +473,7 @@ def build_analysis_state(
     growth_list = build_growth_list(actions)
     exact_opportunities = build_exact_targeting_opportunities(actions)
     priority_list = build_priority_list(actions)
+    self_check = run_diagnosis_self_check(actions, settings.diagnosis_config)
     ai_report_sections = (
         generate_ai_report(overview, actions, aggregations, settings.diagnosis_config.target_acos)
         if settings.ai_report_enabled
@@ -470,6 +501,7 @@ def build_analysis_state(
         growth_list=growth_list,
         exact_opportunities=exact_opportunities,
         priority_list=priority_list,
+        self_check=self_check,
         ai_report_sections=ai_report_sections,
     )
 
@@ -579,6 +611,7 @@ def render_dashboard_tabs(state: AnalysisState) -> None:
 
 def render_overview_tab(state: AnalysisState) -> None:
     render_operator_brief(state)
+    render_diagnosis_accuracy_note()
 
     render_section_header("关键指标", "所有核心指标都基于聚合后的总量重新计算。")
     overview = state.overview
@@ -617,6 +650,20 @@ def render_overview_tab(state: AnalysisState) -> None:
                 render_stat_card(label, value, "neutral")
 
     render_upload_status(state.file_summaries)
+
+
+def render_diagnosis_accuracy_note() -> None:
+    st.markdown(
+        """
+        <div class="table-note">
+            <strong>诊断准确性说明</strong>
+            本工具基于广告报表中的曝光、点击、花费、订单、销售额等数据进行规则诊断。
+            系统会优先保护已有订单对象和数据不足对象，避免过早否定或暂停。
+            所有建议仍建议结合利润率、库存、活动目标和搜索词相关性复核后执行。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_operator_brief(state: AnalysisState) -> None:
@@ -788,31 +835,54 @@ def render_pivot_snapshot(pivot: pd.DataFrame, preset: str) -> None:
 def render_actions_tab(state: AnalysisState) -> None:
     render_section_header("动作建议", "优先级按浪费金额、点击样本、ACOS 偏离、转化缺口和动作紧急度综合计算。")
     render_action_queue(state)
+    render_action_overload_summary_note(state)
     columns = st.columns(4)
     stats = [
-        ("高优先级", state.summary["高优先级"], "danger"),
+        ("今日必做 P0", int(state.actions.get("execution_tier", pd.Series(dtype=str)).eq("P0").sum()), "danger"),
+        ("本周重点 P1", int(state.actions.get("execution_tier", pd.Series(dtype=str)).eq("P1").sum()), "warning"),
+        ("待观察 P2", int(state.actions.get("execution_tier", pd.Series(dtype=str)).eq("P2").sum()), "neutral"),
         ("否定词", state.summary["否定建议"], "danger"),
-        ("降低竞价", count_bid_down(state.bid_adjustments), "warning"),
-        ("精准机会", len(state.exact_opportunities), "success"),
     ]
     for column, stat in zip(columns, stats):
             with column:
                 render_stat_card(*stat)
 
-    st.markdown('<div class="table-note">高优先级不是“全部都急”，而是满足强止损或高损耗标准；中优先级适合本周处理；低优先级用于观察和放量。</div>', unsafe_allow_html=True)
+    st.markdown('<div class="table-note">默认只展示 P0 今日必做和 P1 本周重点；P2 待观察折叠查看，P3 仅进入 Excel 完整明细。</div>', unsafe_allow_html=True)
     must_do_only = st.toggle(
         "只看今日必做",
-        value=False,
+        value=True,
         key="actions_today_must_do",
-        help="聚焦高优先级、暂停、否定、降低竞价和 Listing 检查等当天最适合先处理的动作。",
+        help="聚焦 P0 今日必做动作，默认最多 10 条。",
     )
-    action_source = filter_today_must_do_actions(state.actions) if must_do_only else state.actions
+    if must_do_only and "execution_tier" in state.actions.columns:
+        action_source = state.actions[state.actions["execution_tier"].eq("P0")]
+    else:
+        action_source = state.actions[state.actions.get("execution_tier", pd.Series("", index=state.actions.index)).isin(["P0", "P1"])] if "execution_tier" in state.actions.columns else state.actions
     if must_do_only:
         st.caption(f"已筛出 {len(action_source):,} 条今日必做动作；关闭开关可查看全部建议。")
     filtered = render_action_filters(action_source)
     if "优先级评分" in filtered.columns:
         filtered = filtered.sort_values("优先级评分", ascending=False)
     st.dataframe(style_action_table(filtered), width="stretch", hide_index=True, height=520)
+    if "execution_tier" in state.actions.columns:
+        with st.expander("查看 P2 待观察动作", expanded=False):
+            p2 = state.actions[state.actions["execution_tier"].eq("P2")]
+            st.dataframe(style_action_table(p2.head(200)), width="stretch", hide_index=True, height=420)
+
+
+def render_action_overload_summary_note(state: AnalysisState) -> None:
+    total = len(state.actions)
+    p0 = int(state.actions.get("execution_tier", pd.Series(dtype=str)).eq("P0").sum()) if not state.actions.empty else 0
+    st.markdown(
+        f"""
+        <div class="table-note">
+            <strong>动作收敛说明</strong>
+            系统识别到 {total:,} 条诊断信号，已根据影响金额、数据充分性、置信度和操作风险，
+            筛选出 {p0:,} 条今日必做动作，避免动作过载。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_action_queue(state: AnalysisState) -> None:
@@ -1302,10 +1372,32 @@ def render_export_tab(state: AnalysisState) -> None:
     with st.container(border=True):
         st.subheader("完整 Excel 报告包说明")
         st.caption("包含账户总览、AI 报告、动作建议、透视表、否定词、暂停清单、调价清单、精准机会和清洗后明细。")
+    render_diagnosis_self_check_panel(state)
     with st.expander("字段识别结果", expanded=False):
         st.dataframe(state.mapping_df, width="stretch", hide_index=True)
     with st.expander("清洗后数据明细", expanded=False):
         st.dataframe(format_metric_dataframe(state.enriched_data), width="stretch", hide_index=True)
+
+
+def render_diagnosis_self_check_panel(state: AnalysisState) -> None:
+    result = state.self_check
+    detail = result.get("异常明细", pd.DataFrame())
+    passed = int(result.get("通过项数量", 0))
+    warning = int(result.get("警告项数量", 0))
+    high = int(result.get("高风险异常数量", 0))
+    with st.expander("诊断自检", expanded=bool(high)):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            render_stat_card("通过项", passed, "success")
+        with c2:
+            render_stat_card("警告项", warning, "warning")
+        with c3:
+            render_stat_card("高风险异常", high, "danger" if high else "success")
+        st.caption(str(result.get("修复建议", "")))
+        if isinstance(detail, pd.DataFrame) and not detail.empty:
+            st.dataframe(detail, width="stretch", hide_index=True)
+        else:
+            st.success("诊断自检通过，未发现明显规则冲突。")
 
 
 def render_deepseek_panel(state: AnalysisState) -> None:
@@ -1709,10 +1801,25 @@ def style_export_actions(actions: pd.DataFrame) -> pd.DataFrame:
         column
         for column in [
             "优先级",
+            "优先级评分",
+            "诊断严格度",
+            "命中规则",
+            "数据充分性",
+            "置信度",
+            "操作风险",
             "合并动作",
             "建议动作",
             "诊断对象",
             "原因",
+            "证据说明",
+            "人工复核原因",
+            "执行建议",
+            "复核提醒",
+            "目标 CPA",
+            "账户平均 CTR",
+            "账户平均 CVR",
+            "是否保护词",
+            "是否存在规则冲突",
             "Campaign Name",
             "Ad Group Name",
             "Customer Search Term",
@@ -1722,7 +1829,6 @@ def style_export_actions(actions: pd.DataFrame) -> pd.DataFrame:
             "Orders",
             "ACOS",
             "ROAS",
-            "优先级评分",
         ]
         if column in actions.columns
     ]
@@ -2098,8 +2204,14 @@ def style_action_table(dataframe: pd.DataFrame):
         for column in [
             "优先级",
             "优先级评分",
+            "execution_tier",
+            "action_rank",
+            "estimated_savings",
+            "spend_share",
             "建议动作",
             "合并动作",
+            "priority_reason",
+            "downgrade_reason",
             "诊断层级",
             "诊断对象",
             "Campaign Name",

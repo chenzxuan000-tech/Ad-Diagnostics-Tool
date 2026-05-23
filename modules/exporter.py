@@ -13,6 +13,11 @@ from openpyxl.utils import get_column_letter
 SHEET_ORDER = [
     "账户总览",
     "AI 详情报告",
+    "今日必做 P0",
+    "本周重点 P1",
+    "待观察 P2",
+    "完整诊断信号",
+    "动作过载审计",
     "动作建议清单",
     "否定词清单",
     "暂停清单",
@@ -43,6 +48,11 @@ def build_excel_report(
     sheet_frames = {
         "账户总览": overview,
         "AI 详情报告": ai_report,
+        "今日必做 P0": _filter_tier(actions, "P0"),
+        "本周重点 P1": _filter_tier(actions, "P1"),
+        "待观察 P2": _filter_tier(actions, "P2"),
+        "完整诊断信号": actions,
+        "动作过载审计": _overload_audit_frame(actions),
         "动作建议清单": actions,
         "否定词清单": negative_keywords,
         "暂停清单": pause_list,
@@ -76,6 +86,8 @@ def _format_worksheet(worksheet, dataframe: pd.DataFrame) -> None:
     high_priority_fill = PatternFill("solid", fgColor="FCE4D6")
     medium_priority_fill = PatternFill("solid", fgColor="FFF2CC")
     low_priority_fill = PatternFill("solid", fgColor="E2F0D9")
+    high_risk_fill = PatternFill("solid", fgColor="EADCF8")
+    low_confidence_fill = PatternFill("solid", fgColor="D9EAF7")
     high_priority_font = Font(name="Arial", color="9C0006", bold=True)
     thin_border = Border(bottom=Side(style="thin", color="D9E2EC"))
 
@@ -124,12 +136,27 @@ def _format_worksheet(worksheet, dataframe: pd.DataFrame) -> None:
         if number_format:
             for cell in worksheet[letter][1:]:
                 cell.number_format = number_format
-                if column_name in {"CTR", "CVR", "ACOS", "ROAS", "Spend", "Sales", "CPC", "Budget", "优先级评分", "最高优先级评分"} or column_name.endswith("数"):
+                if column_name in {
+                    "CTR",
+                    "CVR",
+                    "ACOS",
+                    "ROAS",
+                    "Spend",
+                    "Sales",
+                    "CPC",
+                    "Budget",
+                    "优先级评分",
+                    "最高优先级评分",
+                    "目标 ACOS",
+                    "目标 CPA",
+                    "账户平均 CTR",
+                    "账户平均 CVR",
+                } or column_name.endswith("数"):
                     alignment = copy(cell.alignment)
                     alignment.horizontal = "right"
                     cell.alignment = alignment
 
-        if column_name in {"原因", "Reason", "报告内容", "诊断规则"}:
+        if column_name in {"原因", "Reason", "报告内容", "诊断规则", "证据说明", "运营解释", "执行建议", "复核提醒"}:
             worksheet.column_dimensions[letter].width = min(max(worksheet.column_dimensions[letter].width, 28), 80)
             for cell in worksheet[letter][1:]:
                 alignment = copy(cell.alignment)
@@ -144,7 +171,35 @@ def _format_worksheet(worksheet, dataframe: pd.DataFrame) -> None:
         low_priority_fill,
         high_priority_font,
     )
+    _highlight_risk_and_confidence(worksheet, dataframe, high_risk_fill, low_confidence_fill)
     _add_score_color_scale(worksheet, dataframe)
+
+
+def _filter_tier(actions: pd.DataFrame, tier: str) -> pd.DataFrame:
+    if actions.empty or "execution_tier" not in actions.columns:
+        return pd.DataFrame()
+    return actions[actions["execution_tier"].eq(tier)].copy()
+
+
+def _overload_audit_frame(actions: pd.DataFrame) -> pd.DataFrame:
+    if actions.empty:
+        return pd.DataFrame(columns=["指标", "数值"])
+    tier_counts = actions.get("execution_tier", pd.Series(dtype=str)).value_counts().to_dict()
+    return pd.DataFrame(
+        [
+            ("总诊断信号数", len(actions)),
+            ("P0 今日必做数量", tier_counts.get("P0", 0)),
+            ("P1 本周重点数量", tier_counts.get("P1", 0)),
+            ("P2 待观察数量", tier_counts.get("P2", 0)),
+            ("P3 仅记录数量", tier_counts.get("P3", 0)),
+            ("P0 上限", 10),
+            ("P1 上限", 20),
+            ("P0 单动作类型上限", 5),
+            ("P0 单 Campaign 上限", 3),
+            ("筛选规则", "影响金额、数据充分性、置信度、操作风险、Top-N 和 Campaign 限制"),
+        ],
+        columns=["指标", "数值"],
+    )
 
 
 def _highlight_priority_rows(
@@ -192,10 +247,33 @@ def _add_score_color_scale(worksheet, dataframe: pd.DataFrame) -> None:
     )
 
 
+def _highlight_risk_and_confidence(
+    worksheet,
+    dataframe: pd.DataFrame,
+    high_risk_fill: PatternFill,
+    low_confidence_fill: PatternFill,
+) -> None:
+    if dataframe.empty:
+        return
+    columns = list(dataframe.columns)
+    risk_index = columns.index("操作风险") + 1 if "操作风险" in columns else None
+    confidence_index = columns.index("置信度") + 1 if "置信度" in columns else None
+    if not risk_index and not confidence_index:
+        return
+
+    for row_index in range(2, len(dataframe) + 2):
+        if risk_index and worksheet.cell(row=row_index, column=risk_index).value == "高":
+            worksheet.cell(row=row_index, column=risk_index).fill = high_risk_fill
+            worksheet.cell(row=row_index, column=risk_index).font = Font(name="Arial", color="7030A0", bold=True)
+        if confidence_index and worksheet.cell(row=row_index, column=confidence_index).value == "低":
+            worksheet.cell(row=row_index, column=confidence_index).fill = low_confidence_fill
+            worksheet.cell(row=row_index, column=confidence_index).font = Font(name="Arial", color="1F4E79", bold=True)
+
+
 def _number_format_for(column_name: str) -> Optional[str]:
-    if column_name in {"CTR", "CVR", "ACOS"}:
+    if column_name in {"CTR", "CVR", "ACOS", "账户平均 CTR", "账户平均 CVR", "目标 ACOS"}:
         return "0.00%"
-    if column_name in {"Spend", "Sales", "CPC", "数值", "Budget", "总花费", "总销售额"}:
+    if column_name in {"Spend", "Sales", "CPC", "数值", "Budget", "总花费", "总销售额", "目标 CPA"}:
         return '"$"#,##0.00'
     if column_name == "ROAS":
         return "0.00"

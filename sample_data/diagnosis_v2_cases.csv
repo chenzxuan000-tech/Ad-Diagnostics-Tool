@@ -1,0 +1,13 @@
+Campaign Name,Ad Group Name,Customer Search Term,Targeting,Match Type,Impressions,Clicks,Spend,Sales,Orders
+V2 - Waste Campaign,Waste Group,free replacement parts,,Broad,5000,35,48,0,0
+V2 - Test Campaign,Learning Group,early test term,,Broad,220,3,2.5,0,0
+V2 - High ACOS,Exact Group,expensive converter,,Exact,1200,22,45,30,1
+V2 - Growth,Exact Group,best exact term,,Exact,900,30,12,120,4
+V2 - CTR Issue,Broad Group,low click keyword,,Broad,6000,6,4,0,0
+V2 - CVR Issue,Broad Group,high click low order,,Broad,3000,35,35,0,0
+V2 - Mixed Campaign,Mixed Group,good campaign term,,Exact,1200,25,10,100,3
+V2 - Mixed Campaign,Mixed Group,bad campaign term,,Broad,2500,22,38,0,0
+V2 - Pause Candidate,Waste Group,waste one,,Broad,3000,20,28,0,0
+V2 - Pause Candidate,Waste Group,waste two,,Broad,3200,22,30,0,0
+V2 - Pause Candidate,Waste Group,waste three,,Broad,2800,18,24,0,0
+V2 - Protected,Brand Group,brand free parts,,Broad,4000,35,50,0,0
