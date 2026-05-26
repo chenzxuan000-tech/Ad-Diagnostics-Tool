@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -20,11 +22,11 @@ def clean_numeric_columns(df: pd.DataFrame) -> pd.DataFrame:
     ]:
         if column not in cleaned.columns:
             cleaned[column] = 0
-        cleaned[column] = cleaned[column].apply(_to_number)
+        cleaned[column] = cleaned[column].apply(parse_currency_value if column in {CANONICAL_FIELDS["spend"], CANONICAL_FIELDS["sales"]} else parse_numeric_value)
 
     budget_column = CANONICAL_FIELDS.get("budget")
     if budget_column and budget_column in cleaned.columns:
-        cleaned[budget_column] = cleaned[budget_column].apply(_to_number)
+        cleaned[budget_column] = cleaned[budget_column].apply(parse_currency_value)
     return cleaned
 
 
@@ -112,19 +114,52 @@ def _safe_scalar_divide(numerator: float, denominator: float, infinite_when_nume
     return numerator / denominator
 
 
-def _to_number(value: object) -> float:
+def parse_currency_value(value: object) -> float:
+    return parse_numeric_value(value)
+
+
+def parse_percent_value(value: object) -> float:
     if pd.isna(value):
-        return 0.0
+        return np.nan
+
+    if isinstance(value, (int, float, np.number)):
+        numeric = float(value)
+        return numeric / 100 if numeric > 1 else numeric
+
+    text = str(value).strip()
+    if not text or text in ("—", "–", "-", "—", "N/A", "n/a", "NA", "暂无", "无"):
+        return np.nan
+
+    number = _parse_number_text(text)
+    if pd.isna(number):
+        return np.nan
+    return float(number) / 100 if "%" in text or float(number) > 1 else float(number)
+
+
+def parse_numeric_value(value: object) -> float:
+    if pd.isna(value):
+        return np.nan
 
     if isinstance(value, (int, float, np.number)):
         return float(value)
 
     text = str(value).strip()
     if not text or text in ("—", "–", "-", "—", "N/A", "n/a", "NA", "暂无", "无"):
-        return 0.0
+        return np.nan
 
+    number = _parse_number_text(text)
+    return float(number) if not pd.isna(number) else np.nan
+
+
+def _parse_number_text(text: str) -> float:
+    negative = text.startswith("(") and text.endswith(")")
     text = (
         text.replace("$", "")
+        .replace("CA$", "")
+        .replace("C$", "")
+        .replace("CAD", "")
+        .replace("USD", "")
+        .replace("US$", "")
         .replace("¥", "")
         .replace("￥", "")
         .replace(",", "")
@@ -136,8 +171,17 @@ def _to_number(value: object) -> float:
         .replace(" ", "")  # narrow no-break space
         .replace(" ", "")       # regular space (thousands sep in some locales)
     )
+    text = re.sub(r"^[A-Za-z]+", "", text)
+    text = re.sub(r"[A-Za-z]+$", "", text)
+    if negative and not text.startswith("-"):
+        text = f"-{text}"
 
     try:
         return float(text)
     except ValueError:
-        return 0.0
+        return np.nan
+
+
+def _to_number(value: object) -> float:
+    number = parse_numeric_value(value)
+    return 0.0 if pd.isna(number) else float(number)

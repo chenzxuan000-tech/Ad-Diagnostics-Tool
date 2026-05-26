@@ -1,0 +1,6 @@
+﻿文件名,report_type,报表类型,行数,Spend 合计,Sales 合计,Orders 合计,Clicks 合计,Impressions 合计,是否参与账户总览,是否只用于诊断辅助,是否不应参与广告花费 / 销售额汇总,用途说明,排除原因
+diagnosis_v2_cases.csv,SP_SEARCH_TERM_REPORT,商品推广搜索词报表,12,326.5,250.0,8.0,273.0,33020.0,否,是,是,搜索词诊断、否定词建议、精准投放机会,避免与 商品推广投放报表 重复计算
+real_case_ads_report.xlsx,SP_SEARCH_TERM_REPORT,商品推广搜索词报表,1781,4916.91,19261.86,390.0,4430.0,359149.0,否,是,是,搜索词诊断、否定词建议、精准投放机会,避免与 商品推广投放报表 重复计算
+sample_professional_diagnosis_cases.csv,SP_SEARCH_TERM_REPORT,商品推广搜索词报表,13,350.5,251.0,9.0,289.0,35680.0,否,是,是,搜索词诊断、否定词建议、精准投放机会,避免与 商品推广投放报表 重复计算
+sample_search_term_report.csv,SP_SEARCH_TERM_REPORT,商品推广搜索词报表,8,109.9,312.0,11.0,129.0,13600.0,否,是,是,搜索词诊断、否定词建议、精准投放机会,避免与 商品推广投放报表 重复计算
+sample_targeting_report.csv,SP_TARGETING_REPORT,商品推广投放报表,6,158.0,454.0,16.0,173.0,16800.0,是,否,否,Targeting 诊断、关键词 / ASIN 投放诊断、调价建议,

@@ -1,0 +1,11 @@
+{
+  "case_name": "sample_ads_regression_case",
+  "input_dir": "sample_data",
+  "expected_spend_range": [150, 170],
+  "expected_sales_range": [430, 480],
+  "expected_currency": "CAD",
+  "expected_summary_source": "SP_TARGETING_REPORT",
+  "forbidden_summary_sources": ["SP_BULK_FILE", "SEARCH_QUERY_PERFORMANCE_OR_TOP_SEARCH_TERMS"],
+  "max_p0_actions": 10,
+  "note": "当前仓库未包含用户提到的 5100 CAD / 21000 CAD 五文件真实报表组合。本配置使用现有 sample_data 作为可运行 golden case；替换真实报表后同步调整期望范围。"
+}

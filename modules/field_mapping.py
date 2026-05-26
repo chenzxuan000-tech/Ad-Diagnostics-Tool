@@ -48,6 +48,13 @@ COMMON_REQUIRED_FIELDS = {
 
 
 REPORT_REQUIRED_FIELDS = {
+    "SP_SEARCH_TERM_REPORT": COMMON_REQUIRED_FIELDS | {"customer_search_term"},
+    "SP_TARGETING_REPORT": COMMON_REQUIRED_FIELDS | {"targeting"},
+    "SP_CAMPAIGN_REPORT": COMMON_REQUIRED_FIELDS | {"campaign_name"},
+    "SP_BULK_FILE": set(),
+    "SEARCH_QUERY_PERFORMANCE_OR_TOP_SEARCH_TERMS": set(),
+    "UNKNOWN": COMMON_REQUIRED_FIELDS,
+    # Backward-compatible labels used by older tests and saved workbooks.
     "Search Term Report": COMMON_REQUIRED_FIELDS | {"customer_search_term"},
     "Targeting Report": COMMON_REQUIRED_FIELDS | {"targeting"},
     "Unknown Report": COMMON_REQUIRED_FIELDS,
@@ -342,19 +349,9 @@ def mapping_results(
 
 
 def infer_report_type(columns: Iterable[object], filename: str = "") -> str:
-    detected = detect_field_mapping(columns)
-    normalized_filename = normalize_column_name(filename)
+    from modules.basic_data_audit import infer_report_type as infer_standard_report_type
 
-    if "searchterm" in normalized_filename or "searchquery" in normalized_filename:
-        return "Search Term Report"
-    if "targeting" in normalized_filename or "keyword" in normalized_filename:
-        return "Targeting Report"
-
-    if detected.get("customer_search_term"):
-        return "Search Term Report"
-    if detected.get("targeting"):
-        return "Targeting Report"
-    return "Unknown Report"
+    return infer_standard_report_type(columns, filename)
 
 
 def missing_required_fields(
@@ -363,7 +360,7 @@ def missing_required_fields(
     manual_mapping: dict[str, str] | None = None,
 ) -> list[str]:
     detected = detect_field_mapping(columns, manual_mapping)
-    required_fields = REPORT_REQUIRED_FIELDS.get(report_type, REPORT_REQUIRED_FIELDS["Unknown Report"])
+    required_fields = REPORT_REQUIRED_FIELDS.get(report_type, REPORT_REQUIRED_FIELDS["UNKNOWN"])
     missing = [
         CANONICAL_FIELDS[field_key]
         for field_key in sorted(required_fields)

@@ -11,7 +11,33 @@ import streamlit as st
 
 from modules.aggregation import build_dimension_aggregations
 from modules.ai_report import generate_ai_report, report_to_dataframe
+from modules.basic_data_audit import (
+    AccountSummarySource,
+    account_summary_source_note,
+    build_file_audit,
+    duplicate_metric_guard_messages,
+    report_type_display,
+    run_basic_data_audit,
+    select_account_summary_source,
+)
 from modules.action_overload import enrich_action_prioritization
+from modules.data_safety import (
+    DataTrustResult,
+    DiagnosisSafetyGateResult,
+    ReconciliationInput,
+    ReconciliationResult,
+    apply_diagnosis_safety_to_actions,
+    calculate_data_trust_score,
+    data_trust_dataframe,
+    ensure_feedback_columns,
+    operator_feedback_dataframe,
+    reconcile_external_totals,
+    reconciliation_dataframe,
+    rules_version_dataframe,
+    run_diagnosis_safety_gate,
+    safety_gate_dataframe,
+    write_diagnosis_audit_report,
+)
 from modules.data_loader import read_report
 from modules.deepseek_client import DEEPSEEK_MODELS, generate_deepseek_report
 from modules.diagnosis import (
@@ -31,7 +57,7 @@ from modules.field_mapping import CANONICAL_FIELDS, apply_field_mapping, mapping
 from modules.field_mapping import infer_report_type, missing_required_fields
 from modules.metrics import add_metrics, calculate_account_overview, format_percent, overview_dataframe
 from modules.pivot import ACTION_PIVOT_PRESETS, build_action_pivot, build_export_pivots
-from modules.rules_config import DEFAULT_DIAGNOSIS_STRICTNESS, STRICTNESS_OPTIONS
+from modules.rules_config import DEFAULT_DIAGNOSIS_STRICTNESS, DIAGNOSIS_ENGINE_VERSION, RULE_CONFIG_VERSION, STRICTNESS_OPTIONS
 from modules.settings import AppSettings
 
 
@@ -74,6 +100,12 @@ DISPLAY_NAME_MAP = {
 }
 
 DISPLAY_REPORT_TYPE_MAP = {
+    "SP_SEARCH_TERM_REPORT": "商品推广搜索词报表",
+    "SP_TARGETING_REPORT": "商品推广投放报表",
+    "SP_CAMPAIGN_REPORT": "商品推广广告活动报表",
+    "SP_BULK_FILE": "Bulk 文件",
+    "SEARCH_QUERY_PERFORMANCE_OR_TOP_SEARCH_TERMS": "热门搜索词 / Search Query 报告",
+    "UNKNOWN": "未识别报表",
     "Search Term Report": "搜索词报表",
     "Targeting Report": "定向报表",
     "Unknown Report": "未识别报表",
@@ -116,6 +148,21 @@ class AnalysisState:
     mapping_df: pd.DataFrame
     cleaned_data: pd.DataFrame
     enriched_data: pd.DataFrame
+    report_frames: list[dict[str, object]]
+    file_audit: pd.DataFrame
+    account_summary_source: AccountSummarySource | None
+    account_summary_note: pd.DataFrame
+    basic_data_audit: pd.DataFrame
+    duplicate_guard_messages: list[str]
+    data_trust_result: DataTrustResult
+    data_trust_df: pd.DataFrame
+    reconciliation_result: ReconciliationResult
+    reconciliation_df: pd.DataFrame
+    safety_gate: DiagnosisSafetyGateResult
+    safety_gate_df: pd.DataFrame
+    rules_version_df: pd.DataFrame
+    audit_report_path: str
+    generated_at: datetime
     aggregations: dict[str, pd.DataFrame]
     data_quality_notes: list[str]
     action_pivots: dict[str, pd.DataFrame]
@@ -164,6 +211,7 @@ def main() -> None:
 
     if not start_clicked and "analysis_state" not in st.session_state:
         render_upload_status(file_summaries)
+        render_pre_diagnosis_check(loaded_reports, file_summaries, manual_mappings, settings)
         render_waiting_state()
         return
 
@@ -297,6 +345,10 @@ def render_sidebar_controls() -> tuple[AppSettings, list[Any], bool]:
             )
             manual_mapping_enabled = st.checkbox("启用手动字段映射", value=False)
             ai_report_enabled = st.checkbox("启用本地 AI 报告模板", value=True)
+            st.markdown("#### 外部对账")
+            external_spend = st.number_input("外部系统总花费", min_value=0.0, value=0.0, step=100.0, help="例如领星 ERP 的广告总花费；不填写则保持 0。")
+            external_sales = st.number_input("外部系统总销售额", min_value=0.0, value=0.0, step=100.0, help="例如领星 ERP 的广告销售额；不填写则保持 0。")
+            external_orders = st.number_input("外部系统总订单（可选）", min_value=0.0, value=0.0, step=1.0)
 
         protected_terms = tuple(term.strip() for term in re.split(r"[,，\n]", protected_terms_text) if term.strip())
         config = DiagnosisConfig(
@@ -312,7 +364,18 @@ def render_sidebar_controls() -> tuple[AppSettings, list[Any], bool]:
                 render_excel_download(st.session_state["analysis_state"], key="sidebar_export")
 
     return (
-        AppSettings(mode, rule_preset, manual_mapping_enabled, ai_report_enabled, config),
+        AppSettings(
+            mode,
+            rule_preset,
+            manual_mapping_enabled,
+            ai_report_enabled,
+            config,
+            ReconciliationInput(
+                external_spend=float(external_spend) if external_spend else None,
+                external_sales=float(external_sales) if external_sales else None,
+                external_orders=float(external_orders) if external_orders else None,
+            ),
+        ),
         uploaded_files or [],
         start_clicked,
     )
@@ -458,13 +521,44 @@ def build_analysis_state(
     file_summaries: list[dict[str, object]],
     manual_mappings: dict[int, dict[str, str]],
 ) -> AnalysisState:
-    mapping_df, cleaned_data = prepare_data(loaded_reports, manual_mappings)
+    generated_at = datetime.now()
+    mapping_df, cleaned_data, report_frames = prepare_report_frames(loaded_reports, manual_mappings)
     enriched_data = add_metrics(cleaned_data)
+    for report_frame in report_frames:
+        report_frame["enriched_data"] = add_metrics(report_frame["cleaned_data"])
+    account_summary_source = select_account_summary_source(report_frames)
+    overview_source = account_summary_source.dataframe if account_summary_source else pd.DataFrame()
+    overview = calculate_account_overview(overview_source)
+    file_audit = build_file_audit(report_frames, account_summary_source)
+    account_summary_note = account_summary_source_note(account_summary_source)
+    basic_data_audit = run_basic_data_audit(report_frames, account_summary_source, overview)
+    duplicate_guard_messages = duplicate_metric_guard_messages(report_frames, account_summary_source)
+    data_trust_result = calculate_data_trust_score(report_frames, account_summary_source, file_audit, overview)
+    reconciliation_result = reconcile_external_totals(overview, settings.reconciliation_input)
+    safety_gate = run_diagnosis_safety_gate(
+        report_frames,
+        overview,
+        data_trust_result,
+        account_summary_source=account_summary_source,
+        file_audit=file_audit,
+        reconciliation_result=reconciliation_result,
+    )
+    data_trust_df = data_trust_dataframe(data_trust_result)
+    reconciliation_df = reconciliation_dataframe(reconciliation_result)
+    safety_gate_df = safety_gate_dataframe(safety_gate)
+    rules_version_df = rules_version_dataframe(DIAGNOSIS_ENGINE_VERSION, RULE_CONFIG_VERSION, generated_at)
+    file_summaries = enrich_file_summaries_with_audit(file_summaries, file_audit)
     aggregations = build_dimension_aggregations(enriched_data)
     data_quality_notes = build_data_quality_notes(mapping_df, enriched_data)
-    overview = calculate_account_overview(enriched_data)
-    actions = run_diagnosis(enriched_data, settings.diagnosis_config, settings.mode)
-    actions = enrich_action_prioritization(actions, settings.diagnosis_config)
+    data_quality_notes.extend(duplicate_guard_messages)
+    data_quality_notes.extend(data_trust_result.data_quality_warnings)
+    data_quality_notes.extend(safety_gate.warning_reasons)
+    if safety_gate.can_diagnose:
+        actions = run_diagnosis(enriched_data, settings.diagnosis_config, settings.mode)
+        actions = enrich_action_prioritization(actions, settings.diagnosis_config)
+        actions = apply_diagnosis_safety_to_actions(actions, safety_gate, data_trust_result, reconciliation_result)
+    else:
+        actions = ensure_feedback_columns(pd.DataFrame())
     summary = summarize_recommendations(actions)
     action_pivots = build_export_pivots(actions)
     negative_keywords = build_negative_keywords(actions)
@@ -479,6 +573,20 @@ def build_analysis_state(
         if settings.ai_report_enabled
         else [{"章节": "AI 模板报告", "报告内容": "本次已关闭本地 AI 模板报告。"}]
     )
+    audit_report_path = str(Path("outputs") / "diagnosis_audit_report.md")
+    write_diagnosis_audit_report(
+        audit_report_path,
+        file_audit,
+        overview,
+        account_summary_source,
+        data_trust_result,
+        safety_gate,
+        actions,
+        "",
+        DIAGNOSIS_ENGINE_VERSION,
+        RULE_CONFIG_VERSION,
+        generated_at,
+    )
 
     return AnalysisState(
         settings=settings,
@@ -488,6 +596,21 @@ def build_analysis_state(
         mapping_df=mapping_df,
         cleaned_data=cleaned_data,
         enriched_data=enriched_data,
+        report_frames=report_frames,
+        file_audit=file_audit,
+        account_summary_source=account_summary_source,
+        account_summary_note=account_summary_note,
+        basic_data_audit=basic_data_audit,
+        duplicate_guard_messages=duplicate_guard_messages,
+        data_trust_result=data_trust_result,
+        data_trust_df=data_trust_df,
+        reconciliation_result=reconciliation_result,
+        reconciliation_df=reconciliation_df,
+        safety_gate=safety_gate,
+        safety_gate_df=safety_gate_df,
+        rules_version_df=rules_version_df,
+        audit_report_path=audit_report_path,
+        generated_at=generated_at,
         aggregations=aggregations,
         data_quality_notes=data_quality_notes,
         action_pivots=action_pivots,
@@ -613,7 +736,7 @@ def render_overview_tab(state: AnalysisState) -> None:
     render_operator_brief(state)
     render_diagnosis_accuracy_note()
 
-    render_section_header("关键指标", "所有核心指标都基于聚合后的总量重新计算。")
+    render_section_header("关键指标", "账户总览只基于一个权威数据源计算，避免不同维度报表重复累计。")
     overview = state.overview
     target_acos = state.settings.diagnosis_config.target_acos
     kpis = [
@@ -631,6 +754,9 @@ def render_overview_tab(state: AnalysisState) -> None:
         for column, item in zip(columns, row):
             with column:
                 render_kpi_card(*item)
+
+    render_account_summary_source_note(state)
+    render_duplicate_metric_guard(state)
 
     render_section_header("诊断摘要", "展示当前分析覆盖度、风险规模和机会数量。")
     summary_items = [
@@ -650,6 +776,208 @@ def render_overview_tab(state: AnalysisState) -> None:
                 render_stat_card(label, value, "neutral")
 
     render_upload_status(state.file_summaries)
+    render_diagnosis_audit_summary(state)
+    render_file_audit_table(state)
+    render_basic_data_audit_panel(state)
+
+
+def render_account_summary_source_note(state: AnalysisState) -> None:
+    source = state.account_summary_source
+    source_text = (
+        f"{display_report_type(source.report_type)} | {source.filename}"
+        if source
+        else "未选择"
+    )
+    currency = source.currency if source else "CAD"
+    st.markdown(
+        f"""
+        <div class="table-note">
+            账户总览基于：{escape_html(source_text)}。其他报表仅用于维度诊断，未参与总花费 / 总销售额重复汇总。
+            当前统计货币：{escape_html(currency)}。
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_data_safety_summary(state: AnalysisState) -> None:
+    trust = state.data_trust_result
+    safety = state.safety_gate
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        render_stat_card("数据可信度", f"{trust.data_trust_score}/100 · {trust.data_trust_level}", "danger" if trust.data_trust_level == "低" else "warning" if trust.data_trust_level == "中" else "success")
+    with c2:
+        render_stat_card("诊断安全阀", safety.safety_level, "danger" if not safety.can_diagnose else "warning" if not safety.can_generate_p0 else "success")
+    with c3:
+        render_stat_card("外部对账", state.reconciliation_result.reconciliation_status, "danger" if state.reconciliation_result.reconciliation_status == "阻止诊断" else "warning" if state.reconciliation_result.reconciliation_status in {"警告", "严重警告"} else "success")
+    with c4:
+        render_stat_card("规则版本", DIAGNOSIS_ENGINE_VERSION, "neutral")
+    if trust.data_trust_level == "低":
+        st.error("当前数据可信度较低，系统已关闭 P0 今日必做动作，建议先修复数据源或确认报表口径。")
+    if state.reconciliation_result.reconciliation_status in {"严重警告", "阻止诊断"}:
+        st.warning("工具计算结果与外部系统差异较大，建议先复核报表口径，不建议直接执行广告动作。")
+    if not safety.can_diagnose:
+        st.error("诊断安全阀已阻断动作生成。当前仅建议查看数据审计并修复上传报表。")
+    render_data_trust_detail_panel(
+        trust,
+        state.safety_gate,
+        state.account_summary_source,
+        state.file_audit,
+    )
+
+
+def render_data_trust_detail_panel(
+    trust: DataTrustResult,
+    safety: DiagnosisSafetyGateResult,
+    source: AccountSummarySource | None,
+    file_audit: pd.DataFrame,
+) -> None:
+    source_text = f"{display_report_type(source.report_type)} | {source.filename}" if source else "未选择"
+    duplicate_risk = "否" if not file_audit.empty and file_audit["是否参与账户总览"].eq("是").sum() <= 1 else "是"
+    warnings_text = "；".join(trust.data_quality_warnings)
+    rows = [
+        ("数据可信度等级", trust.data_trust_level, "通过" if trust.data_trust_level == "高" else "警告" if trust.data_trust_level == "中" else "阻止"),
+        ("当前账户总览数据源", source_text, "通过" if source else "阻止"),
+        ("是否存在重复计算风险", duplicate_risk, "通过" if duplicate_risk == "否" else "阻止"),
+        ("核心字段是否完整", "否" if "缺少核心字段" in warnings_text else "是", "警告" if "缺少核心字段" in warnings_text else "通过"),
+        ("金额字段是否解析正常", "否" if "无法解析" in warnings_text or "空值" in warnings_text else "是", "警告" if "无法解析" in warnings_text or "空值" in warnings_text else "通过"),
+        ("是否有异常指标", "是" if any(keyword in warnings_text for keyword in ["Clicks > Impressions", "Orders > Clicks", "CVR > 100", "ACOS 极端"]) else "否", "警告" if any(keyword in warnings_text for keyword in ["Clicks > Impressions", "Orders > Clicks", "CVR > 100", "ACOS 极端"]) else "通过"),
+        ("是否可以生成 P0 今日必做", "是" if safety.can_generate_p0 else "否", "通过" if safety.can_generate_p0 else "阻止"),
+    ]
+    with st.expander("数据可信度", expanded=trust.data_trust_level != "高"):
+        if trust.data_trust_level == "低":
+            st.error("当前数据可信度较低，系统已关闭强动作建议。请先检查报表类型、字段识别和数据口径。")
+        st.dataframe(pd.DataFrame(rows, columns=["检查项", "结果", "状态"]), width="stretch", hide_index=True)
+        if trust.data_quality_warnings:
+            st.caption("数据提醒：" + "；".join(trust.data_quality_warnings[:4]))
+        if trust.blocking_errors:
+            st.caption("阻止项：" + "；".join(trust.blocking_errors))
+
+
+def render_duplicate_metric_guard(state: AnalysisState) -> None:
+    for message in state.duplicate_guard_messages:
+        st.warning(message)
+
+
+def render_file_audit_table(state: AnalysisState) -> None:
+    if state.file_audit.empty:
+        return
+    render_section_header("上传文件审计", "确认每个文件的报表类型、用途和是否参与账户总览。")
+    st.dataframe(state.file_audit, width="stretch", hide_index=True)
+
+
+def render_basic_data_audit_panel(state: AnalysisState) -> None:
+    if state.basic_data_audit.empty:
+        return
+    high_risk = state.basic_data_audit["风险级别"].isin(["严重错误", "高风险"]).any()
+    with st.expander("基础数据自检", expanded=bool(high_risk)):
+        if high_risk:
+            st.error("基础数据自检发现高风险项，请先修正数据口径再解读诊断建议。")
+        else:
+            st.success("基础数据自检通过：账户总览未跨多个报表重复累计。")
+        st.dataframe(state.basic_data_audit, width="stretch", hide_index=True)
+
+
+def render_pre_diagnosis_check(
+    loaded_reports: list[dict[str, object]],
+    file_summaries: list[dict[str, object]],
+    manual_mappings: dict[int, dict[str, str]],
+    settings: AppSettings,
+) -> None:
+    if not loaded_reports:
+        return
+    render_section_header("一键自检", "上传报表后先检查数据是否可信，再开始诊断。")
+    if not st.button("一键自检", type="secondary", width="stretch", key="run_pre_diagnosis_self_check"):
+        st.caption("点击后会检查报表类型、字段识别、总览口径、重复计算风险、异常指标、P0 门禁和 Excel 导出可用性。")
+        return
+
+    try:
+        _mapping_df, _cleaned_data, report_frames = prepare_report_frames(loaded_reports, manual_mappings)
+        for report_frame in report_frames:
+            report_frame["enriched_data"] = add_metrics(report_frame["cleaned_data"])
+        source = select_account_summary_source(report_frames)
+        overview = calculate_account_overview(source.dataframe if source else pd.DataFrame())
+        file_audit = build_file_audit(report_frames, source)
+        trust = calculate_data_trust_score(report_frames, source, file_audit, overview)
+        reconciliation = reconcile_external_totals(overview, settings.reconciliation_input)
+        safety = run_diagnosis_safety_gate(
+            report_frames,
+            overview,
+            trust,
+            account_summary_source=source,
+            file_audit=file_audit,
+            reconciliation_result=reconciliation,
+        )
+    except Exception as exc:
+        st.error(f"诊断前检查失败：{type(exc).__name__}: {exc}")
+        return
+
+    rows = build_pre_diagnosis_check_rows(loaded_reports, file_summaries, file_audit, source, trust, safety)
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    render_data_trust_detail_panel(trust, safety, source, file_audit)
+    if any(row["状态"] == "阻止" for row in rows):
+        st.error("存在阻止项，本次不会生成强动作建议。请先修复字段、报表类型或总览数据源。")
+    elif any(row["状态"] == "警告" for row in rows):
+        st.warning("存在警告项，可以继续诊断，但建议先复核数据口径。")
+    else:
+        st.success("诊断前检查通过，可以开始诊断。")
+
+
+def build_pre_diagnosis_check_rows(
+    loaded_reports: list[dict[str, object]],
+    file_summaries: list[dict[str, object]],
+    file_audit: pd.DataFrame,
+    source: AccountSummarySource | None,
+    trust: DataTrustResult,
+    safety: DiagnosisSafetyGateResult,
+) -> list[dict[str, str]]:
+    report_types = [str(report.get("report_type", "")) for report in loaded_reports]
+    missing_fields = "；".join(str(item.get("缺失必需字段", "")) for item in file_summaries if item.get("缺失必需字段"))
+    included_count = int(file_audit["是否参与账户总览"].eq("是").sum()) if not file_audit.empty else 0
+    bulk_wrong = bool(not file_audit.empty and ((file_audit["report_type"].eq("SP_BULK_FILE")) & file_audit["是否参与账户总览"].eq("是")).any())
+    top_wrong = bool(not file_audit.empty and ((file_audit["report_type"].eq("SEARCH_QUERY_PERFORMANCE_OR_TOP_SEARCH_TERMS")) & file_audit["是否参与账户总览"].eq("是")).any())
+    source_label = f"{display_report_type(source.report_type)} | {source.filename}" if source else "未选择"
+    summary_metrics_from_source = source is not None and included_count == 1
+    parse_warning_text = "；".join(trust.data_quality_warnings)
+    parse_ok = not any(keyword in parse_warning_text for keyword in ["无法解析", "空值"])
+    abnormal_metric = any(keyword in parse_warning_text for keyword in ["Clicks > Impressions", "Orders > Clicks", "CVR > 100", "ACOS 极端"])
+    can_export_excel = bool(loaded_reports) and source is not None
+    return [
+        _check_row("是否已上传文件", bool(loaded_reports), "通过" if loaded_reports else "阻止"),
+        _check_row("是否识别到报表类型", bool(report_types) and all(report_type not in {"读取失败", "UNKNOWN"} for report_type in report_types), "通过" if bool(report_types) and all(report_type not in {"读取失败", "UNKNOWN"} for report_type in report_types) else "警告"),
+        _check_row("是否识别到 Spend / Sales / Orders / Clicks / Impressions", not missing_fields, "通过" if not missing_fields else "警告", missing_fields or "核心指标字段已识别"),
+        _check_row("是否明确 account_summary_source", source is not None, "通过" if source else "阻止", source_label),
+        _check_row("总花费、总销售额是否来自权威报表", summary_metrics_from_source, "通过" if summary_metrics_from_source else "阻止", source_label),
+        _check_row("是否存在多个报表重复汇总风险", included_count <= 1, "通过" if included_count <= 1 else "阻止", f"参与总览文件数：{included_count}"),
+        _check_row("Bulk 文件是否被错误纳入总览", not bulk_wrong, "通过" if not bulk_wrong else "阻止"),
+        _check_row("热门搜索词报告是否被错误纳入广告表现统计", not top_wrong, "通过" if not top_wrong else "阻止"),
+        _check_row("Spend / Sales / Orders / Clicks / Impressions 是否解析正常", parse_ok, "通过" if parse_ok else "警告", "解析正常" if parse_ok else parse_warning_text),
+        _check_row("是否存在 Clicks > Impressions、Orders > Clicks 等异常", not abnormal_metric, "通过" if not abnormal_metric else "警告", "未发现账户级异常" if not abnormal_metric else parse_warning_text),
+        _check_row("数据可信度评分", trust.data_trust_score >= 70, "通过" if trust.data_trust_score >= 85 else "警告" if trust.data_trust_score >= 70 else "阻止", f"{trust.data_trust_score}/100 · {trust.data_trust_level}"),
+        _check_row("是否可以开始诊断", safety.can_diagnose, "通过" if safety.can_diagnose else "阻止", "；".join(safety.blocking_reasons) or "可以开始"),
+        _check_row("是否可以生成 P0 今日必做", safety.can_generate_p0, "通过" if safety.can_generate_p0 else "阻止", f"data_trust_score={trust.data_trust_score}"),
+        _check_row("是否可以导出 Excel", can_export_excel, "通过" if can_export_excel else "阻止", "可导出完整诊断包" if can_export_excel else "缺少有效报表或总览来源"),
+    ]
+
+
+def _check_row(item: str, passed: bool, status: str, detail: str = "") -> dict[str, str]:
+    return {"检查项": item, "结果": "是" if passed else "否", "状态": status, "说明": detail}
+
+
+def render_diagnosis_audit_summary(state: AnalysisState) -> None:
+    with st.expander("诊断审计摘要", expanded=False):
+        tier_counts = state.actions.get("execution_tier", pd.Series(dtype=str)).value_counts().to_dict() if not state.actions.empty else {}
+        rows = [
+            ("审计报告", state.audit_report_path),
+            ("诊断引擎版本", DIAGNOSIS_ENGINE_VERSION),
+            ("规则配置版本", RULE_CONFIG_VERSION),
+            ("数据可信度", f"{state.data_trust_result.data_trust_score}/100 · {state.data_trust_result.data_trust_level}"),
+            ("安全阀", state.safety_gate.safety_level),
+            ("诊断信号数", len(state.actions)),
+            ("P0 / P1 / P2 / P3", f"{tier_counts.get('P0', 0)} / {tier_counts.get('P1', 0)} / {tier_counts.get('P2', 0)} / {tier_counts.get('P3', 0)}"),
+            ("高风险需复核动作", int(state.actions.get("需要人工复核", pd.Series(dtype=str)).astype(str).eq("是").sum()) if not state.actions.empty else 0),
+        ]
+        st.dataframe(pd.DataFrame(rows, columns=["项目", "内容"]), width="stretch", hide_index=True)
 
 
 def render_diagnosis_accuracy_note() -> None:
@@ -834,6 +1162,13 @@ def render_pivot_snapshot(pivot: pd.DataFrame, preset: str) -> None:
 
 def render_actions_tab(state: AnalysisState) -> None:
     render_section_header("动作建议", "优先级按浪费金额、点击样本、ACOS 偏离、转化缺口和动作紧急度综合计算。")
+    st.markdown(
+        '<div class="table-note">操作前请结合库存、利润率、活动目标和搜索词相关性复核。已有订单的对象不建议直接否定或暂停，优先考虑调价。高风险动作已标记为“需人工复核”。</div>',
+        unsafe_allow_html=True,
+    )
+    if not state.safety_gate.can_generate_p0:
+        st.warning("诊断安全阀已关闭 P0 今日必做动作；当前建议只作为复核线索。")
+    render_copy_zones(state)
     render_action_queue(state)
     render_action_overload_summary_note(state)
     columns = st.columns(4)
@@ -868,6 +1203,80 @@ def render_actions_tab(state: AnalysisState) -> None:
         with st.expander("查看 P2 待观察动作", expanded=False):
             p2 = state.actions[state.actions["execution_tier"].eq("P2")]
             st.dataframe(style_action_table(p2.head(200)), width="stretch", hide_index=True, height=420)
+    render_operator_feedback_panel(state)
+
+
+def render_copy_zones(state: AnalysisState) -> None:
+    negative_text = build_negative_copy_text(state.actions)
+    exact_text = build_exact_copy_text(state.actions)
+    with st.expander("复制到亚马逊广告后台", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**否定词复制区**")
+            st.caption("仅包含 P0 / P1 的否定建议，已排除 Orders > 0 的对象。")
+            st.text_area("否定词复制区", value=negative_text, height=180, label_visibility="collapsed", key="negative_copy_area")
+        with c2:
+            st.markdown("**精准投放词复制区**")
+            st.caption("仅包含 P0 / P1 中建议提取为 Exact 的搜索词。")
+            st.text_area("精准投放词复制区", value=exact_text, height=180, label_visibility="collapsed", key="exact_copy_area")
+
+
+def build_negative_copy_text(actions: pd.DataFrame) -> str:
+    if actions.empty or "execution_tier" not in actions.columns:
+        return ""
+    source = actions[
+        actions["execution_tier"].isin(["P0", "P1"])
+        & actions["合并动作"].astype(str).str.contains("否定", na=False)
+        & (actions["Orders"].fillna(0).astype(float) <= 0)
+    ].copy()
+    terms = source["Customer Search Term"].fillna("").astype(str).str.strip()
+    terms = terms[terms.ne("")]
+    return "\n".join(dict.fromkeys(terms.tolist()))
+
+
+def build_exact_copy_text(actions: pd.DataFrame) -> str:
+    if actions.empty or "execution_tier" not in actions.columns:
+        return ""
+    source = actions[
+        actions["execution_tier"].isin(["P0", "P1"])
+        & actions["合并动作"].astype(str).str.contains("提取精准投放", na=False)
+    ].copy()
+    terms = source["Customer Search Term"].fillna("").astype(str).str.strip()
+    terms = terms[terms.ne("")]
+    return "\n".join(dict.fromkeys(terms.tolist()))
+
+
+def render_operator_feedback_panel(state: AnalysisState) -> None:
+    if state.actions.empty:
+        return
+    with st.expander("运营反馈记录", expanded=False):
+        st.caption("反馈会保存在当前会话，并进入 Excel 的“运营反馈记录” Sheet。")
+        feedback_columns = [
+            "诊断对象",
+            "建议动作",
+            "需要人工复核",
+            "operator_feedback",
+            "feedback_reason",
+            "reviewed_by",
+            "reviewed_at",
+        ]
+        editor_source = state.actions[[column for column in feedback_columns if column in state.actions.columns]].copy()
+        edited = st.data_editor(
+            editor_source,
+            width="stretch",
+            hide_index=True,
+            key="operator_feedback_editor",
+            column_config={
+                "operator_feedback": st.column_config.SelectboxColumn("operator_feedback", options=["", "准确", "不准确", "太激进", "太保守", "已执行", "暂不执行", "需要复核"]),
+                "feedback_reason": st.column_config.TextColumn("feedback_reason"),
+                "reviewed_by": st.column_config.TextColumn("reviewed_by"),
+                "reviewed_at": st.column_config.TextColumn("reviewed_at"),
+            },
+            disabled=[column for column in editor_source.columns if column not in {"operator_feedback", "feedback_reason", "reviewed_by", "reviewed_at"}],
+        )
+        for column in ["operator_feedback", "feedback_reason", "reviewed_by", "reviewed_at"]:
+            if column in edited.columns:
+                state.actions.loc[edited.index, column] = edited[column]
 
 
 def render_action_overload_summary_note(state: AnalysisState) -> None:
@@ -1376,7 +1785,13 @@ def render_export_tab(state: AnalysisState) -> None:
     with st.expander("字段识别结果", expanded=False):
         st.dataframe(state.mapping_df, width="stretch", hide_index=True)
     with st.expander("清洗后数据明细", expanded=False):
-        st.dataframe(format_metric_dataframe(state.enriched_data), width="stretch", hide_index=True)
+        preview_limit = 500
+        st.caption(f"前端仅预览前 {preview_limit:,} 行，完整清洗明细会进入 Excel 导出，避免大表预览导致页面报错。")
+        st.dataframe(
+            format_pivot_dataframe(state.enriched_data.head(preview_limit)),
+            width="stretch",
+            hide_index=True,
+        )
 
 
 def render_diagnosis_self_check_panel(state: AnalysisState) -> None:
@@ -1632,7 +2047,7 @@ def render_deepseek_raw_panel(content: str) -> None:
 def render_upload_status(file_summaries: list[dict[str, object]]) -> None:
     if not file_summaries:
         return
-    render_section_header("上传状态", "每个文件都会独立读取。")
+    render_section_header("上传状态", "每个文件都会独立读取并识别用途。")
     for row in chunked(file_summaries, 3):
         columns = st.columns(3)
         for column, item in zip(columns, row):
@@ -1644,6 +2059,14 @@ def render_upload_status(file_summaries: list[dict[str, object]]) -> None:
                     st.markdown(render_status_badge(status or "未知状态", tone), unsafe_allow_html=True)
                     st.caption(f"报表类型：{display_report_type(item.get('识别到的报表类型', ''))}")
                     st.caption(f"数据行数：{item.get('行数', 0)} · 列数：{item.get('列数', 0)}")
+                    if item.get("是否参与账户总览"):
+                        st.caption(f"参与账户总览：{item.get('是否参与账户总览')}")
+                        st.caption(f"仅用于诊断辅助：{item.get('是否只用于诊断辅助')}")
+                        st.caption(f"不参与花费 / 销售额汇总：{item.get('是否不应参与广告花费 / 销售额汇总')}")
+                    if item.get("用途说明"):
+                        st.caption(f"用途：{item.get('用途说明')}")
+                    if item.get("排除原因"):
+                        st.caption(f"排除原因：{item.get('排除原因')}")
                     missing = item.get("缺失必需字段", "") or "无"
                     st.caption(f"缺失字段：{missing}")
 
@@ -1741,22 +2164,69 @@ def render_manual_mapping_controls(loaded_reports: list[dict[str, object]], enab
     return manual_mappings
 
 
-def prepare_data(loaded_reports: list[dict[str, object]], manual_mappings: dict[int, dict[str, str]] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def prepare_report_frames(
+    loaded_reports: list[dict[str, object]],
+    manual_mappings: dict[int, dict[str, str]] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, list[dict[str, object]]]:
     mapping_rows = []
     cleaned_frames = []
+    report_frames: list[dict[str, object]] = []
     for index, report in enumerate(loaded_reports):
         report_name = f"{report['report_type']} | {report['filename']}"
         dataframe = report["dataframe"]
         manual_mapping = (manual_mappings or {}).get(index, {})
         mapping_rows.extend(mapping_results(report_name, dataframe.columns, manual_mapping))
-        cleaned_frames.append(apply_field_mapping(dataframe, report_name, manual_mapping))
+        cleaned = apply_field_mapping(dataframe, report_name, manual_mapping)
+        cleaned_frames.append(cleaned)
+        report_frames.append(
+            {
+                "filename": report["filename"],
+                "report_type": report["report_type"],
+                "source_report": report_name,
+                "raw_data": dataframe,
+                "cleaned_data": cleaned,
+            }
+        )
     mapping_df = mapping_results_dataframe(mapping_rows)
     if not mapping_df.empty:
         mapping_df["报表"] = mapping_df["Report"].astype(str).apply(_display_report_cell)
         mapping_df["标准字段"] = mapping_df["标准字段"].astype(str).apply(display_field_name)
         mapping_df = mapping_df.drop(columns=["Report"])
     cleaned_data = pd.concat(cleaned_frames, ignore_index=True) if cleaned_frames else pd.DataFrame()
+    return mapping_df, cleaned_data, report_frames
+
+
+def prepare_data(loaded_reports: list[dict[str, object]], manual_mappings: dict[int, dict[str, str]] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    mapping_df, cleaned_data, _report_frames = prepare_report_frames(loaded_reports, manual_mappings)
     return mapping_df, cleaned_data
+
+
+def enrich_file_summaries_with_audit(file_summaries: list[dict[str, object]], file_audit: pd.DataFrame) -> list[dict[str, object]]:
+    if file_audit.empty:
+        return file_summaries
+    audit_by_name = {str(row["文件名"]): row for _, row in file_audit.iterrows()}
+    enriched: list[dict[str, object]] = []
+    for summary in file_summaries:
+        item = dict(summary)
+        audit = audit_by_name.get(str(item.get("文件名", "")))
+        if audit is not None:
+            item.update(
+                {
+                    "识别到的报表类型": audit.get("report_type", item.get("识别到的报表类型", "")),
+                    "是否参与账户总览": audit.get("是否参与账户总览", ""),
+                    "是否只用于诊断辅助": audit.get("是否只用于诊断辅助", ""),
+                    "是否不应参与广告花费 / 销售额汇总": audit.get("是否不应参与广告花费 / 销售额汇总", ""),
+                    "用途说明": audit.get("用途说明", ""),
+                    "排除原因": audit.get("排除原因", ""),
+                    "Spend 合计": audit.get("Spend 合计", 0),
+                    "Sales 合计": audit.get("Sales 合计", 0),
+                    "Orders 合计": audit.get("Orders 合计", 0),
+                    "Clicks 合计": audit.get("Clicks 合计", 0),
+                    "Impressions 合计": audit.get("Impressions 合计", 0),
+                }
+            )
+        enriched.append(item)
+    return enriched
 
 
 def build_data_quality_notes(mapping_df: pd.DataFrame, enriched_data: pd.DataFrame) -> list[str]:
@@ -1839,9 +2309,16 @@ def style_export_actions(actions: pd.DataFrame) -> pd.DataFrame:
 def build_management_summary_dataframe(state: AnalysisState) -> pd.DataFrame:
     overview = state.overview
     summary = state.summary
+    source = state.account_summary_source
     rows = [
         ("诊断时间", datetime.now().strftime("%Y-%m-%d %H:%M")),
+        ("诊断引擎版本", DIAGNOSIS_ENGINE_VERSION),
+        ("规则配置版本", RULE_CONFIG_VERSION),
         ("诊断口径", state.settings.rule_preset),
+        ("账户总览数据源", f"{display_report_type(source.report_type)} | {source.filename}" if source else "未选择"),
+        ("重复计算防护", "是"),
+        ("数据可信度", f"{state.data_trust_result.data_trust_score}/100 · {state.data_trust_result.data_trust_level}"),
+        ("诊断安全阀", state.safety_gate.safety_level),
         ("目标 ACOS", format_percent(state.settings.diagnosis_config.target_acos)),
         ("ACOS", format_percent(safe_float(overview.get("ACOS")))),
         ("ROAS", f"{safe_float(overview.get('ROAS')):,.2f}"),
@@ -1860,9 +2337,9 @@ def render_excel_download(state: AnalysisState, key: str) -> None:
     name_key = f"excel_export_name_{key}"
     if st.button("生成完整诊断 Excel", type="primary", width="stretch", key=f"{key}_build"):
         with st.spinner("正在生成 Excel 工作簿..."):
-            st.session_state[bytes_key] = build_report_bytes(state)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             st.session_state[name_key] = f"amazon_ads_diagnostic_pro_{timestamp}.xlsx"
+            st.session_state[bytes_key] = build_report_bytes(state, st.session_state[name_key])
 
     if st.session_state.get(bytes_key):
         st.download_button(
@@ -1876,7 +2353,7 @@ def render_excel_download(state: AnalysisState, key: str) -> None:
         )
 
 
-def build_report_bytes(state: AnalysisState) -> bytes:
+def build_report_bytes(state: AnalysisState, excel_filename: str = "") -> bytes:
     ai_sections = list(state.ai_report_sections)
     if st.session_state.get("deepseek_report") and not any(item["章节"] == "DeepSeek 复核报告" for item in ai_sections):
         ai_sections.append({"章节": "DeepSeek 复核报告", "报告内容": str(st.session_state["deepseek_report"])})
@@ -1884,6 +2361,20 @@ def build_report_bytes(state: AnalysisState) -> bytes:
         **getattr(state, "action_pivots", build_export_pivots(state.actions)),
         **getattr(state, "aggregations", {}),
     }
+    if excel_filename:
+        write_diagnosis_audit_report(
+            state.audit_report_path,
+            state.file_audit,
+            state.overview,
+            state.account_summary_source,
+            state.data_trust_result,
+            state.safety_gate,
+            state.actions,
+            excel_filename,
+            DIAGNOSIS_ENGINE_VERSION,
+            RULE_CONFIG_VERSION,
+            datetime.now(),
+        )
     return build_excel_report(
         state.overview_df,
         report_to_dataframe(ai_sections),
@@ -1895,6 +2386,14 @@ def build_report_bytes(state: AnalysisState) -> bytes:
         state.enriched_data,
         state.priority_list,
         export_tables,
+        file_audit=state.file_audit,
+        account_summary_note=state.account_summary_note,
+        basic_data_audit=state.basic_data_audit,
+        data_trust=state.data_trust_df,
+        reconciliation=state.reconciliation_df,
+        safety_gate=state.safety_gate_df,
+        operator_feedback=operator_feedback_dataframe(state.actions),
+        rules_version=state.rules_version_df,
     )
 
 

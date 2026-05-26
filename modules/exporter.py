@@ -12,6 +12,14 @@ from openpyxl.utils import get_column_letter
 
 SHEET_ORDER = [
     "账户总览",
+    "数据源审计",
+    "总览口径说明",
+    "基础数据自检",
+    "数据可信度",
+    "外部对账",
+    "诊断安全检查",
+    "运营反馈记录",
+    "规则版本说明",
     "AI 详情报告",
     "今日必做 P0",
     "本周重点 P1",
@@ -40,6 +48,14 @@ def build_excel_report(
     priority_list: pd.DataFrame,
     aggregations: Optional[dict[str, pd.DataFrame]] = None,
     action_pivots: Optional[dict[str, pd.DataFrame]] = None,
+    file_audit: Optional[pd.DataFrame] = None,
+    account_summary_note: Optional[pd.DataFrame] = None,
+    basic_data_audit: Optional[pd.DataFrame] = None,
+    data_trust: Optional[pd.DataFrame] = None,
+    reconciliation: Optional[pd.DataFrame] = None,
+    safety_gate: Optional[pd.DataFrame] = None,
+    operator_feedback: Optional[pd.DataFrame] = None,
+    rules_version: Optional[pd.DataFrame] = None,
 ) -> bytes:
     output = BytesIO()
     aggregations = aggregations or {}
@@ -47,6 +63,14 @@ def build_excel_report(
 
     sheet_frames = {
         "账户总览": overview,
+        "数据源审计": file_audit if file_audit is not None else pd.DataFrame(),
+        "总览口径说明": account_summary_note if account_summary_note is not None else pd.DataFrame(),
+        "基础数据自检": basic_data_audit if basic_data_audit is not None else pd.DataFrame(),
+        "数据可信度": data_trust if data_trust is not None else pd.DataFrame(),
+        "外部对账": reconciliation if reconciliation is not None else pd.DataFrame(),
+        "诊断安全检查": safety_gate if safety_gate is not None else pd.DataFrame(),
+        "运营反馈记录": operator_feedback if operator_feedback is not None else pd.DataFrame(),
+        "规则版本说明": rules_version if rules_version is not None else pd.DataFrame(),
         "AI 详情报告": ai_report,
         "今日必做 P0": _filter_tier(actions, "P0"),
         "本周重点 P1": _filter_tier(actions, "P1"),
@@ -258,26 +282,31 @@ def _highlight_risk_and_confidence(
     columns = list(dataframe.columns)
     risk_index = columns.index("操作风险") + 1 if "操作风险" in columns else None
     confidence_index = columns.index("置信度") + 1 if "置信度" in columns else None
-    if not risk_index and not confidence_index:
+    review_index = columns.index("需要人工复核") + 1 if "需要人工复核" in columns else None
+    if not risk_index and not confidence_index and not review_index:
         return
 
     for row_index in range(2, len(dataframe) + 2):
         if risk_index and worksheet.cell(row=row_index, column=risk_index).value == "高":
             worksheet.cell(row=row_index, column=risk_index).fill = high_risk_fill
             worksheet.cell(row=row_index, column=risk_index).font = Font(name="Arial", color="7030A0", bold=True)
+        if review_index and worksheet.cell(row=row_index, column=review_index).value == "是":
+            for cell in worksheet[row_index]:
+                cell.fill = high_risk_fill
+            worksheet.cell(row=row_index, column=review_index).font = Font(name="Arial", color="9C0006", bold=True)
         if confidence_index and worksheet.cell(row=row_index, column=confidence_index).value == "低":
             worksheet.cell(row=row_index, column=confidence_index).fill = low_confidence_fill
             worksheet.cell(row=row_index, column=confidence_index).font = Font(name="Arial", color="1F4E79", bold=True)
 
 
 def _number_format_for(column_name: str) -> Optional[str]:
-    if column_name in {"CTR", "CVR", "ACOS", "账户平均 CTR", "账户平均 CVR", "目标 ACOS"}:
+    if column_name in {"CTR", "CVR", "ACOS", "账户平均 CTR", "账户平均 CVR", "目标 ACOS", "花费差异比例", "销售额差异比例", "订单差异比例"}:
         return "0.00%"
-    if column_name in {"Spend", "Sales", "CPC", "数值", "Budget", "总花费", "总销售额", "目标 CPA"}:
+    if column_name in {"Spend", "Sales", "CPC", "数值", "Budget", "总花费", "总销售额", "目标 CPA", "Spend 合计", "Sales 合计", "工具总花费", "外部总花费", "花费差异金额", "工具总销售额", "外部总销售额", "销售额差异金额"}:
         return '"$"#,##0.00'
     if column_name == "ROAS":
         return "0.00"
-    if column_name in {"Impressions", "Clicks", "Orders", "总曝光", "总点击", "总订单"}:
+    if column_name in {"Impressions", "Clicks", "Orders", "总曝光", "总点击", "总订单", "Orders 合计", "Clicks 合计", "Impressions 合计", "行数", "工具总订单", "外部总订单", "订单差异金额"}:
         return "#,##0"
     if column_name in {"优先级评分", "最高优先级评分"} or column_name.endswith("数"):
         return "0"

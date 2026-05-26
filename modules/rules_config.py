@@ -7,6 +7,8 @@ DEFAULT_TARGET_ACOS = 0.30
 DEFAULT_PROTECTED_TERMS: tuple[str, ...] = ()
 STRICTNESS_OPTIONS = ("保守", "标准", "激进")
 DEFAULT_DIAGNOSIS_STRICTNESS = "标准"
+DIAGNOSIS_ENGINE_VERSION = "v2.1-data-safety"
+RULE_CONFIG_VERSION = "2026-05-data-safety"
 
 
 @dataclass(frozen=True)
